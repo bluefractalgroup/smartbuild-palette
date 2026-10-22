@@ -1,0 +1,6 @@
+# Only the settings this app relies on. `supabase link` fills in the rest.
+project_id = "smartbuild-palette"
+
+[functions.extract-colors]
+# Only signed-in users can spend Claude credits.
+verify_jwt = true
