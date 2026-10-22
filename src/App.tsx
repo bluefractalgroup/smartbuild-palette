@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
-import { supabase } from "./lib/supabase";
+import { supabase, supabaseUrl } from "./lib/supabase";
 import { extractFile } from "./lib/extract";
 import { buildRows, validateRows, sourceLabel } from "./lib/rows";
 import { toCsv, toJson, download } from "./lib/csv";
@@ -45,7 +45,7 @@ function SignIn() {
             email,
             options: { emailRedirectTo: window.location.href },
           });
-          if (error) { setState("error"); setMessage(error.message); }
+          if (error) { setState("error"); setMessage(`${error.message} (project: ${supabaseUrl})`); }
           else setState("sent");
         }}
       >
