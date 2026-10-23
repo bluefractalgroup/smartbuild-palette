@@ -44,7 +44,21 @@ export async function aiLabel(page: RenderedPage, candidates: Candidate[], fileN
       text: page.text.map((t) => ({ text: t.text, x: r(t.x), y: r(t.y), w: r(t.w), h: r(t.h) })),
     },
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    // Show the function's own error text (e.g. "Claude API returned 401") rather than
+    // the generic "non-2xx status code".
+    let detail = error.message;
+    try {
+      const ctx = (error as { context?: Response }).context;
+      if (ctx && typeof ctx.json === "function") {
+        const body = await ctx.clone().json();
+        if (body?.error) detail = `${body.error} (status ${ctx.status})`;
+      }
+    } catch {
+      /* keep the generic message */
+    }
+    throw new Error(detail);
+  }
   const res = data as AiResult;
   // Boxes come back in the scaled picture's pixels.
   res.colors = (res.colors ?? []).map((col) =>
