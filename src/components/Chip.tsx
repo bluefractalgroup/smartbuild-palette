@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Swatch } from "../lib/types";
 
 interface Props {
@@ -14,6 +15,9 @@ interface Props {
  */
 export function Chip({ swatch, compare, onToggle }: Props) {
   const { name, hex, types, textured, chartCrop, selected } = swatch;
+  // A low-resolution texture (e.g. from a screenshot) is tiled at its own size instead
+  // of being enlarged, so the grain stays sharp.
+  const [tile, setTile] = useState<{ w: number; h: number } | null>(null);
   return (
     <button
       type="button"
@@ -25,7 +29,26 @@ export function Chip({ swatch, compare, onToggle }: Props) {
     >
       <span className="color" aria-hidden="true">
         {textured ? (
-          <img className="tex" src={chartCrop} alt="" />
+          tile ? (
+            <span
+              className="tex"
+              style={{ backgroundImage: `url(${chartCrop})`, backgroundSize: `${tile.w}px ${tile.h}px`, backgroundRepeat: "repeat" }}
+            />
+          ) : (
+            <img
+              className="tex"
+              src={chartCrop}
+              alt=""
+              onLoad={(e) => {
+                const img = e.currentTarget;
+                // Enlarging more than about 1.5x on screen visibly softens the texture.
+                const shown = img.clientWidth * (window.devicePixelRatio || 1);
+                if (img.naturalWidth > 0 && img.naturalWidth * 1.5 < shown) {
+                  setTile({ w: img.naturalWidth, h: img.naturalHeight });
+                }
+              }}
+            />
+          )
         ) : compare ? (
           <>
             <span style={{ background: hex }} />

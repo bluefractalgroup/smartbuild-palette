@@ -13,6 +13,9 @@ export interface ExtractResult {
 
 const uid = () => crypto.randomUUID();
 
+/** Long side, in pixels, of a textured chip's stored image (sharp on high-density screens). */
+const TEXTURE_SIDE = 640;
+
 function crop(canvas: HTMLCanvasElement, b: Box, maxSide = 160): string {
   const s = Math.min(1, maxSide / Math.max(b.w, b.h));
   const c = document.createElement("canvas");
@@ -48,9 +51,10 @@ export async function extractFile(
 ): Promise<ExtractResult> {
   const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
   onProgress("Opening the chart");
-  const pages = isPdf
+  const rendered = isPdf
     ? await renderPdf(file, (n, total) => onProgress(`Reading page ${n} of ${total}`))
     : await renderImage(file);
+  const pages = rendered.pages;
 
   const allText = pages.flatMap((p) => p.text);
   const guess = guessSource(allText, file.name);
@@ -136,12 +140,25 @@ export async function extractFile(
     }
 
     for (const n of named) {
+      let chartCrop: string;
+      if (n.textured) {
+        // Textures are shown as the chart's own image, so render them sharp.
+        try {
+          const c = await page.renderCrop(n.box, TEXTURE_SIDE);
+          chartCrop = c.toDataURL("image/jpeg", 0.9);
+          c.width = 0;
+        } catch {
+          chartCrop = crop(page.canvas, n.box, TEXTURE_SIDE);
+        }
+      } else {
+        chartCrop = crop(page.canvas, inset(n.box, 0.06));
+      }
       swatches.push({
         id: uid(),
         sourceId: source.id,
         name: n.name || `Unnamed ${swatches.length + 1}`,
         hex: n.hex,
-        chartCrop: crop(page.canvas, n.textured ? n.box : inset(n.box, 0.06)),
+        chartCrop,
         textured: n.textured,
         types: n.types,
         serial: n.serial,
@@ -158,7 +175,8 @@ export async function extractFile(
   else if (!swatches.length) source.note = "No color chips were found in this file.";
   else if (swatches.some((s) => s.name.startsWith("Unnamed"))) source.note = "Some chips have no name on the chart. Name them in the review step.";
 
-  // Release the page canvases.
+  // Release the page canvases and the document.
   pages.forEach((p) => { p.canvas.width = 0; p.canvas.height = 0; });
+  await rendered.close().catch(() => {});
   return { source, swatches };
 }

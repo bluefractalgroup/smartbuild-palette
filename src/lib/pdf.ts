@@ -1,6 +1,6 @@
 import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import type { Box, RenderedPage, TextLine } from "./types";
+import type { Box, RenderedFile, RenderedPage, TextLine } from "./types";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -19,12 +19,12 @@ function boxFromMatrix(m: Matrix): Box {
   return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
 }
 
-async function imagePlacements(page: pdfjs.PDFPageProxy, viewport: pdfjs.PageViewport): Promise<Box[]> {
+async function imagePlacements(page: pdfjs.PDFPageProxy, viewport: pdfjs.PageViewport): Promise<(Box & { density?: number })[]> {
   const ops = await page.getOperatorList();
   const O = pdfjs.OPS;
   const stack: Matrix[] = [];
   let ctm: Matrix = [1, 0, 0, 1, 0, 0];
-  const boxes: Box[] = [];
+  const boxes: (Box & { density?: number })[] = [];
   for (let i = 0; i < ops.fnArray.length; i++) {
     const fn = ops.fnArray[i];
     const args = ops.argsArray[i];
@@ -46,10 +46,19 @@ async function imagePlacements(page: pdfjs.PDFPageProxy, viewport: pdfjs.PageVie
         ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
         break;
       case O.paintImageXObject:
-      case O.paintInlineImageXObject:
-      case O.paintImageXObjectRepeat:
-        boxes.push(boxFromMatrix(mul(viewport.transform as Matrix, ctm)));
+      case O.paintImageXObjectRepeat: {
+        const b = boxFromMatrix(mul(viewport.transform as Matrix, ctm));
+        // args: [objId, width, height] in image pixels.
+        const w = Number(args?.[1]);
+        boxes.push(w > 0 && b.w > 0 ? { ...b, density: w / b.w } : b);
         break;
+      }
+      case O.paintInlineImageXObject: {
+        const b = boxFromMatrix(mul(viewport.transform as Matrix, ctm));
+        const w = Number(args?.[0]?.width);
+        boxes.push(w > 0 && b.w > 0 ? { ...b, density: w / b.w } : b);
+        break;
+      }
     }
   }
   return boxes;
@@ -91,7 +100,10 @@ async function textLines(page: pdfjs.PDFPageProxy, viewport: pdfjs.PageViewport)
     .filter((l) => l.text);
 }
 
-export async function renderPdf(file: File, onPage?: (n: number, total: number) => void): Promise<RenderedPage[]> {
+/** Textured chips (galvalume, metallics) are re-rendered this sharp, so their grain stays crisp. */
+const MAX_CROP_SCALE = 16;
+
+export async function renderPdf(file: File, onPage?: (n: number, total: number) => void): Promise<RenderedFile> {
   const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
   const pages: RenderedPage[] = [];
   for (let n = 1; n <= doc.numPages; n++) {
@@ -108,15 +120,35 @@ export async function renderPdf(file: File, onPage?: (n: number, total: number) 
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvasContext: ctx, viewport }).promise;
     const [text, imageBoxes] = await Promise.all([textLines(page, viewport), imagePlacements(page, viewport)]);
-    pages.push({ page: n, width: canvas.width, height: canvas.height, scale, canvas, text, imageBoxes });
-    page.cleanup();
+    const renderCrop = async (box: Box, longSide: number) => {
+      // Render only this region, at the resolution the crop needs, but never past the
+      // detail the PDF holds: an embedded screenshot has only so many pixels, and
+      // enlarging them here would only blur them.
+      const cx0 = box.x + box.w / 2, cy0 = box.y + box.h / 2;
+      const host = imageBoxes
+        .filter((b) => b.density && cx0 >= b.x && cx0 <= b.x + b.w && cy0 >= b.y && cy0 <= b.y + b.h)
+        .sort((a, b) => a.w * a.h - b.w * b.h)[0];
+      let k = longSide / Math.max(box.w, box.h);
+      if (host?.density) k = Math.min(k, Math.max(0.25, host.density));
+      k = Math.min(k, MAX_CROP_SCALE / scale);
+      const s = scale * k;
+      const vp = page.getViewport({ scale: s, offsetX: -box.x * k, offsetY: -box.y * k });
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(box.w * k));
+      c.height = Math.max(1, Math.round(box.h * k));
+      const cx = c.getContext("2d")!;
+      cx.fillStyle = "#FFFFFF";
+      cx.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: cx, viewport: vp }).promise;
+      return c;
+    };
+    pages.push({ page: n, width: canvas.width, height: canvas.height, scale, canvas, text, imageBoxes, renderCrop });
   }
-  await doc.destroy();
-  return pages;
+  return { pages, close: () => doc.destroy() };
 }
 
 /** Photos or screenshots of a chart: one page, no text layer — the AI step names the chips. */
-export async function renderImage(file: File): Promise<RenderedPage[]> {
+export async function renderImage(file: File): Promise<RenderedFile> {
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, TARGET_LONG_SIDE / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement("canvas");
@@ -124,5 +156,18 @@ export async function renderImage(file: File): Promise<RenderedPage[]> {
   canvas.height = Math.round(bitmap.height * scale);
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  return [{ page: 1, width: canvas.width, height: canvas.height, scale, canvas, text: [], imageBoxes: [] }];
+  const renderCrop = async (box: Box, longSide: number) => {
+    // Crop from the original photo, not the scaled-down working copy.
+    const src = { x: box.x / scale, y: box.y / scale, w: box.w / scale, h: box.h / scale };
+    const k = Math.min(1, longSide / Math.max(src.w, src.h));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(src.w * k));
+    c.height = Math.max(1, Math.round(src.h * k));
+    const cx = c.getContext("2d")!;
+    cx.imageSmoothingQuality = "high";
+    cx.drawImage(bitmap, src.x, src.y, src.w, src.h, 0, 0, c.width, c.height);
+    return c;
+  };
+  const page: RenderedPage = { page: 1, width: canvas.width, height: canvas.height, scale, canvas, text: [], imageBoxes: [], renderCrop };
+  return { pages: [page], close: async () => bitmap.close() };
 }

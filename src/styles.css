@@ -137,7 +137,7 @@ select.field { padding-right: 4px; }
 }
 .chip .color .seam::before { top: 0; }
 .chip .color .seam::after { bottom: 0; }
-.chip .color .tex { width: 100%; height: 100%; object-fit: cover; }
+.chip .color .tex { width: 100%; height: 100%; object-fit: cover; display: block; }
 .chip .plate { padding: 7px 9px 8px; display: grid; gap: 1px; min-height: 64px; }
 .chip .name { font-weight: 650; font-stretch: 85%; font-size: 14px; line-height: 1.2; }
 .chip .hex { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink-2); letter-spacing: 0.02em; }

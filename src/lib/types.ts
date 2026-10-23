@@ -26,7 +26,16 @@ export interface RenderedPage {
   scale: number;
   canvas: HTMLCanvasElement;
   text: TextLine[];
-  imageBoxes: Box[];
+  /** Where images are placed, with their native detail (image pixels per canvas pixel). */
+  imageBoxes: (Box & { density?: number })[];
+  /** Re-renders one region (in this page's canvas pixels) at higher resolution. */
+  renderCrop: (box: Box, longSide: number) => Promise<HTMLCanvasElement>;
+}
+
+export interface RenderedFile {
+  pages: RenderedPage[];
+  /** Frees the PDF or image once extraction is done. */
+  close: () => Promise<void>;
 }
 
 export type ExtractMethod = "ai" | "layout";
