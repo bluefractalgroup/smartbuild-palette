@@ -79,7 +79,9 @@ Report every paint color offered on this page:
 - Mark metallic, galvalume and other non-flat finishes as textured.
 - Names can wrap onto two lines ("Burnished" / "Slate" is "Burnished Slate"). Paint system labels like STANDARD | PRIME | ULTRA go in types, not in the name.
 - Leave out notes such as "Trim in 29 ga only."
-- Report each chip once.`;
+- Report each chip once.
+
+Answer by calling the report_colors tool.`;
 }
 
 Deno.serve(async (req) => {
@@ -106,7 +108,8 @@ Deno.serve(async (req) => {
       model: MODEL,
       max_tokens: 4096,
       tools: [tool],
-      tool_choice: { type: "tool", name: "report_colors" },
+      // Newer models reject a forced tool choice; "auto" plus a clear instruction works on all.
+      tool_choice: { type: "auto" },
       messages: [
         {
           role: "user",
@@ -127,8 +130,22 @@ Deno.serve(async (req) => {
 
   const out = await res.json();
   const call = out.content?.find((c: { type: string }) => c.type === "tool_use");
-  if (!call) return json({ error: "Claude did not return colors." }, 502);
-  const input = call.input as {
+  let raw: unknown = call?.input;
+  if (!raw) {
+    // Fallback: a JSON object in a text reply.
+    const text = (out.content ?? [])
+      .filter((c: { type: string }) => c.type === "text")
+      .map((c: { text: string }) => c.text)
+      .join("\n");
+    const m = /\{[\s\S]*\}/.exec(text);
+    try {
+      raw = m ? JSON.parse(m[0]) : undefined;
+    } catch {
+      raw = undefined;
+    }
+  }
+  if (!raw) return json({ error: "Claude did not return colors." }, 502);
+  const input = raw as {
     manufacturer?: string;
     product_line?: string;
     colors?: { candidate_id?: number; box?: number[]; textured?: boolean; name: string; types?: string[]; serial?: string }[];
