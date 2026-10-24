@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { getEditorName } from "./editor";
 import { normalizeHex } from "./color";
 import type { ExportRow, PaletteDoc } from "./types";
 
@@ -87,8 +88,7 @@ export async function savePalette(doc: PaletteDoc, basedOn?: string, force = fal
     writeLocal([stamped, ...all]);
     return stamped.updatedAt;
   }
-  const { data: auth } = await supabase.auth.getUser();
-  const me = auth.user?.email ?? "";
+  const me = getEditorName() || "Someone";
   if (!force) {
     const { data: current, error: readErr } = await supabase
       .from("palettes")
@@ -96,7 +96,8 @@ export async function savePalette(doc: PaletteDoc, basedOn?: string, force = fal
       .eq("id", doc.id)
       .maybeSingle();
     if (readErr) throw readErr;
-    if (current && current.updated_by && current.updated_by !== me && (!basedOn || Date.parse(current.updated_at) > Date.parse(basedOn) + 1)) {
+    // A different editor, or the same palette saved from another browser by "Someone".
+    if (current && current.updated_by && (current.updated_by !== me || me === "Someone") && (!basedOn || Date.parse(current.updated_at) > Date.parse(basedOn) + 1)) {
       throw new SaveConflict(current.updated_by, current.updated_at);
     }
   }
@@ -105,14 +106,6 @@ export async function savePalette(doc: PaletteDoc, basedOn?: string, force = fal
     .upsert({ id: doc.id, name: doc.name, doc: stamped, updated_at: stamped.updatedAt, updated_by: me });
   if (error) throw error;
   return stamped.updatedAt;
-}
-
-/** True when the signed-in user's email is on a team domain (always true in local mode). */
-export async function isTeamMember(): Promise<boolean> {
-  if (!supabase) return true;
-  const { data, error } = await supabase.rpc("is_team_member");
-  if (error) return true; // older database without the function: let RLS decide
-  return data === true;
 }
 
 export async function deletePalette(id: string): Promise<void> {

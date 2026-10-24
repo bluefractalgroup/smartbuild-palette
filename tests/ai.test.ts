@@ -2,10 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildMessagesRequest,
   buildPrompt,
-  emailFromAuthHeader,
-  isTeamEmail,
+  originAllowed,
   parseClaudeOutput,
-  DEFAULT_TEAM_DOMAINS,
+  DEFAULT_ALLOWED_ORIGINS,
   type ExtractRequest,
 } from "../supabase/functions/extract-colors/index";
 import { placeAiColors } from "../src/lib/extract";
@@ -139,21 +138,12 @@ describe("reading Claude's reply", () => {
   });
 });
 
-describe("team access to AI naming", () => {
-  const jwt = (payload: object) =>
-    "Bearer x." + btoa(JSON.stringify(payload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") + ".sig";
-
-  it("reads the email from the access token", () => {
-    expect(emailFromAuthHeader(jwt({ email: "bstudholme@smartbuildsystems.com" }))).toBe("bstudholme@smartbuildsystems.com");
-    expect(emailFromAuthHeader(null)).toBe("");
-    expect(emailFromAuthHeader("Bearer not-a-jwt")).toBe("");
-  });
-
-  it("allows team domains only", () => {
-    expect(isTeamEmail("Ken.Furie@BlueFractalGroup.com", DEFAULT_TEAM_DOMAINS)).toBe(true);
-    expect(isTeamEmail("bstudholme@smartbuildsystems.com", DEFAULT_TEAM_DOMAINS)).toBe(true);
-    expect(isTeamEmail("someone@gmail.com", DEFAULT_TEAM_DOMAINS)).toBe(false);
-    expect(isTeamEmail("", DEFAULT_TEAM_DOMAINS)).toBe(false);
+describe("who may use AI naming", () => {
+  it("accepts the app's own address and rejects others", () => {
+    expect(originAllowed("https://bluefractalgroup.github.io", DEFAULT_ALLOWED_ORIGINS)).toBe(true);
+    expect(originAllowed("http://localhost:5173", DEFAULT_ALLOWED_ORIGINS)).toBe(true);
+    expect(originAllowed("https://evil.example", DEFAULT_ALLOWED_ORIGINS)).toBe(false);
+    expect(originAllowed(null, DEFAULT_ALLOWED_ORIGINS)).toBe(false);
   });
 });
 

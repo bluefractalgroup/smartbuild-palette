@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
-import { supabase, supabaseUrl } from "./lib/supabase";
+import { supabase } from "./lib/supabase";
+import { getEditorName, setEditorName } from "./lib/editor";
 import { extractFile } from "./lib/extract";
 import { buildRows, validateRows, sourceLabel } from "./lib/rows";
 import { toCsv, toJson, download } from "./lib/csv";
-import { deletePalette, isTeamMember, listPalettes, loadPalette, newPalette, recordExport, savePalette, SaveConflict, type PaletteSummary } from "./lib/store";
+import { deletePalette, listPalettes, loadPalette, newPalette, recordExport, savePalette, SaveConflict, type PaletteSummary } from "./lib/store";
 import type { CodeStyle, PaletteDoc, RowOverride, Source } from "./lib/types";
 import { Chip } from "./components/Chip";
 import { ChartRail } from "./components/ChartRail";
@@ -13,79 +13,11 @@ import { ReviewTable } from "./components/ReviewTable";
 type Tab = "choose" | "review";
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [authReady, setAuthReady] = useState(!supabase);
-
-  useEffect(() => {
-    if (!supabase) return;
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setAuthReady(true);
-    });
-    const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
-    return () => data.subscription.unsubscribe();
-  }, []);
-
-  if (!authReady) return null;
-  if (supabase && !session) return <SignIn />;
-  return <TeamGate email={session?.user.email ?? null} />;
+  return <Workspace />;
 }
 
-/** Palettes are shared by the whole team; anyone else gets a clear message instead of an empty app. */
-function TeamGate({ email }: { email: string | null }) {
-  const [team, setTeam] = useState<boolean | null>(null);
-  useEffect(() => {
-    isTeamMember().then(setTeam);
-  }, [email]);
-  if (team === null) return null;
-  if (!team)
-    return (
-      <main className="signin">
-        <form onSubmit={(e) => { e.preventDefault(); supabase?.auth.signOut(); }}>
-          <h1>SmartBuild Color Palette</h1>
-          <p>This app is for the SmartBuild and Blue Fractal team. You're signed in as {email}. Sign in with your work email instead.</p>
-          <button className="btn primary">Sign out</button>
-        </form>
-      </main>
-    );
-  return <Workspace email={email} />;
-}
-
-function SignIn() {
-  const [email, setEmail] = useState("");
-  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
-  const [message, setMessage] = useState("");
-  return (
-    <main className="signin">
-      <form
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setState("sending");
-          const { error } = await supabase!.auth.signInWithOtp({
-            email,
-            options: { emailRedirectTo: window.location.href },
-          });
-          if (error) { setState("error"); setMessage(`${error.message} (project: ${supabaseUrl})`); }
-          else setState("sent");
-        }}
-      >
-        <h1>SmartBuild Color Palette</h1>
-        {state === "sent" ? (
-          <p>Check {email} for a sign-in link. Open it in this browser.</p>
-        ) : (
-          <>
-            <p>Enter your work email and we'll send you a sign-in link.</p>
-            <input className="field" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" aria-label="Email" />
-            <button className="btn primary" disabled={state === "sending"}>{state === "sending" ? "Sending link…" : "Send sign-in link"}</button>
-            {state === "error" && <p role="alert" style={{ color: "var(--danger)" }}>{message}</p>}
-          </>
-        )}
-      </form>
-    </main>
-  );
-}
-
-function Workspace({ email }: { email: string | null }) {
+function Workspace() {
+  const [editor, setEditor] = useState(getEditorName);
   const [doc, setDoc] = useState<PaletteDoc | null>(null);
   const [list, setList] = useState<PaletteSummary[]>([]);
   const [tab, setTab] = useState<Tab>("choose");
@@ -246,7 +178,7 @@ function Workspace({ email }: { email: string | null }) {
                   {p.name}
                   <span className="when">
                     Edited {new Date(p.updatedAt).toLocaleString()}
-                    {p.updatedBy ? ` by ${p.updatedBy.split("@")[0]}` : ""}
+                    {p.updatedBy ? ` by ${p.updatedBy}` : ""}
                   </span>
                 </button>
               ))}
@@ -285,11 +217,16 @@ function Workspace({ email }: { email: string | null }) {
           <span className="save-state" role="status">
             {{ saved: "Saved", saving: "Saving…", unsaved: "Editing", error: "Not saved", conflict: "Not saved" }[saveState]}
           </span>
-          {email ? (
-            <>
-              <span>{email}</span>
-              <button className="btn quiet" onClick={() => supabase?.auth.signOut()}>Sign out</button>
-            </>
+          {supabase ? (
+            <label className={"editor" + (editor ? "" : " missing")}>
+              <span>Your name</span>
+              <input
+                className="field"
+                value={editor}
+                placeholder="Shown on palettes you edit"
+                onChange={(e) => { setEditor(e.target.value); setEditorName(e.target.value); }}
+              />
+            </label>
           ) : (
             <span title="No Supabase project is configured, so palettes stay in this browser.">Local mode</span>
           )}
@@ -299,7 +236,7 @@ function Workspace({ email }: { email: string | null }) {
       {conflict && (
         <div className="conflict" role="alert">
           <span>
-            <strong>{conflict.by.split("@")[0]}</strong> saved changes to this palette at{" "}
+            <strong>{conflict.by}</strong> saved changes to this palette at{" "}
             {new Date(conflict.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}, after you opened it.
             Your recent edits aren't saved yet.
           </span>

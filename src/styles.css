@@ -53,6 +53,9 @@ button, input, select { font: inherit; color: inherit; }
 .palette-name:focus { border-color: var(--ink-3); background: var(--plate); outline: none; }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--ink-2); font-size: 13px; }
 .save-state { min-width: 64px; text-align: right; }
+.editor { display: flex; align-items: center; gap: 8px; }
+.editor .field { width: 190px; padding: 5px 8px; font-size: 13px; }
+.editor.missing .field { border-color: var(--ink); }
 
 /* ---------- Buttons & fields ---------- */
 .btn {

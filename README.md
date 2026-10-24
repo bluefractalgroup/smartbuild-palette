@@ -65,43 +65,42 @@ npm run dev
 With no Supabase settings, the app runs in local mode: palettes are kept in
 this browser, and names come from the chart layout (no AI).
 
-### With Supabase (sign-in, saved palettes, AI naming)
+### With Supabase (shared palettes, AI naming)
 
 1. Create a Supabase project.
 2. Run `supabase/migrations/20261022000000_init.sql` in the SQL editor. It
    creates `palettes` (working state) and `palette_colors` (exported rows and
    their codes, which later onboarding steps will reuse). Both are locked to
    their owner with row-level security.
-3. Under Authentication → URL Configuration, add the app's URL (and
-   `http://localhost:5173` for development) to the redirect URLs. Sign-in uses
-   an email link.
-4. Deploy the AI function and set its key:
+3. Deploy the AI function and set its key:
    ```
    supabase link --project-ref <ref>
    supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
    supabase functions deploy extract-colors
    ```
-   Optional: `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`). The function
-   only accepts signed-in users.
-5. Copy `.env.example` to `.env.local` and fill in the project URL and anon key.
+   Optional: `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`). Turn off
+   **Verify JWT** for the function (the app has no sign-in).
+4. Copy `.env.example` to `.env.local` and fill in the project URL and anon key.
 
 If the AI call fails, the app falls back to reading names from the chart
 layout and says so beside that chart.
 
-### Team sharing
+### Open access and shared palettes
 
-Every palette is shared with the whole team: anyone signed in with an email on a
-team domain can open, edit and export any palette. Team domains are listed in two
-places, which should match:
+The app has no sign-in: anyone with its link can open, edit, export and delete
+any palette. Each person types their name once (top right); it is kept in their
+browser and shown on the palettes they edit. If someone else saves a palette
+after you opened it, the app won't overwrite their work. It asks whether to load
+their version or keep yours.
 
-- the `team_domains` table (who can read and save palettes)
-- the `TEAM_DOMAINS` secret on the `extract-colors` function (who can use AI
-  naming); it defaults to `smartbuildsystems.com,bluefractalgroup.com`
+Run the migrations in order: `20261022000000_init.sql`,
+`20261024000000_team_sharing.sql`, then `20261024010000_open_access.sql`.
 
-If a teammate saves a palette after you opened it, the app won't overwrite their
-work. It asks whether to load their version or keep yours.
-
-Run `supabase/migrations/20261024000000_team_sharing.sql` after the first migration.
+The AI function runs without JWT verification and accepts requests only from the
+app's web address (`ALLOWED_ORIGINS`, default
+`https://bluefractalgroup.github.io` plus localhost). Browsers enforce that; a
+determined person could still call it directly and spend Claude credits, so
+keep an eye on usage in the Anthropic console.
 
 ### Hosting on GitHub Pages
 

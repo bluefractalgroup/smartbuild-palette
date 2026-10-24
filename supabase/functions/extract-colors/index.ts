@@ -5,13 +5,16 @@
 // paint types and serial number. It never supplies a color value.
 //
 // Secrets: ANTHROPIC_API_KEY (required), ANTHROPIC_MODEL (optional),
-//          TEAM_DOMAINS (optional, comma-separated; defaults below).
+//          ALLOWED_ORIGINS (optional, comma-separated; defaults below).
+//
+// The app has no sign-in, so JWT verification is off for this function. Requests
+// are accepted only from the app's own web address (browsers enforce this).
 //
 // The pure functions are exported so tests and the AI evaluation can use the exact
 // prompt and parsing that production uses. The server only starts under Deno.
 
 export const DEFAULT_MODEL = "claude-sonnet-5-5";
-export const DEFAULT_TEAM_DOMAINS = ["smartbuildsystems.com", "bluefractalgroup.com"];
+export const DEFAULT_ALLOWED_ORIGINS = ["https://bluefractalgroup.github.io", "http://localhost:5173", "http://localhost:4173"];
 
 export interface ExtractRequest {
   fileName: string;
@@ -174,35 +177,25 @@ export function parseClaudeOutput(out: { content?: { type: string; input?: unkno
   };
 }
 
-/** The signed-in user's email from the request's (already verified) access token. */
-export function emailFromAuthHeader(header: string | null): string {
-  const token = header?.replace(/^Bearer\s+/i, "") ?? "";
-  const part = token.split(".")[1];
-  if (!part) return "";
-  try {
-    const b64 = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
-    const payload = JSON.parse(atob(b64));
-    return typeof payload.email === "string" ? payload.email : "";
-  } catch {
-    return "";
-  }
-}
-
-export function isTeamEmail(email: string, domains: string[]): boolean {
-  const d = email.toLowerCase().split("@")[1];
-  return !!d && domains.map((x) => x.trim().toLowerCase()).includes(d);
+/** True when the request comes from one of the app's own web addresses. */
+export function originAllowed(origin: string | null, allowed: string[]): boolean {
+  if (!origin) return false;
+  return allowed.map((o) => o.trim().replace(/\/$/, "")).includes(origin.replace(/\/$/, ""));
 }
 
 /* ---------- Server (Deno only) ---------- */
 
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+function corsFor(origin: string | null) {
+  return {
+    "Access-Control-Allow-Origin": origin ?? "null",
+    "Vary": "Origin",
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+  };
+}
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: { ...cors, "content-type": "application/json" } });
+function json(data: unknown, status: number, origin: string | null) {
+  return new Response(JSON.stringify(data), { status, headers: { ...corsFor(origin), "content-type": "application/json" } });
 }
 
 type DenoLike = { env: { get(k: string): string | undefined }; serve(h: (r: Request) => Response | Promise<Response>): void };
@@ -211,23 +204,23 @@ const deno = (globalThis as { Deno?: DenoLike }).Deno;
 if (deno) {
   const MODEL = deno.env.get("ANTHROPIC_MODEL") ?? DEFAULT_MODEL;
   const API_KEY = deno.env.get("ANTHROPIC_API_KEY");
-  const TEAM = (deno.env.get("TEAM_DOMAINS") ?? DEFAULT_TEAM_DOMAINS.join(",")).split(",");
+  const ALLOWED = (deno.env.get("ALLOWED_ORIGINS") ?? DEFAULT_ALLOWED_ORIGINS.join(",")).split(",");
 
   deno.serve(async (req) => {
-    if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-    if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: cors });
-    if (!API_KEY) return json({ error: "ANTHROPIC_API_KEY is not set on this function." }, 500);
-    if (!isTeamEmail(emailFromAuthHeader(req.headers.get("authorization")), TEAM)) {
-      return json({ error: "AI naming is only available to team members." }, 403);
-    }
+    const origin = req.headers.get("origin");
+    const ok = originAllowed(origin, ALLOWED);
+    if (req.method === "OPTIONS") return new Response("ok", { headers: corsFor(ok ? origin : null) });
+    if (!ok) return json({ error: "Requests are accepted only from the color palette app." }, 403, null);
+    if (req.method !== "POST") return json({ error: "Method not allowed" }, 405, origin);
+    if (!API_KEY) return json({ error: "ANTHROPIC_API_KEY is not set on this function." }, 500, origin);
 
     let body: ExtractRequest;
     try {
       body = await req.json();
     } catch {
-      return json({ error: "Request body must be JSON." }, 400);
+      return json({ error: "Request body must be JSON." }, 400, origin);
     }
-    if (!body.image || !body.width) return json({ error: "Missing page image." }, 400);
+    if (!body.image || !body.width) return json({ error: "Missing page image." }, 400, origin);
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -237,11 +230,11 @@ if (deno) {
     if (!res.ok) {
       const detail = await res.text();
       console.error("Anthropic error", res.status, detail);
-      return json({ error: `Claude API returned ${res.status}` }, 502);
+      return json({ error: `Claude API returned ${res.status}` }, 502, origin);
     }
 
     const parsed = parseClaudeOutput(await res.json(), body.candidates.map((c) => c.id));
-    if (!parsed) return json({ error: "Claude did not return colors." }, 502);
-    return json(parsed);
+    if (!parsed) return json({ error: "Claude did not return colors." }, 502, origin);
+    return json(parsed, 200, origin);
   });
 }

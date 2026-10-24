@@ -2,5 +2,5 @@
 project_id = "smartbuild-palette"
 
 [functions.extract-colors]
-# Only signed-in users can spend Claude credits.
-verify_jwt = true
+# The app has no sign-in; the function accepts requests only from the app's origin.
+verify_jwt = false
