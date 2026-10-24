@@ -1,0 +1,34 @@
+name: AI naming evaluation
+
+# Run by hand from the Actions tab: sends the captured chart pages to Claude with the
+# production prompt and scores the answers. Needs the ANTHROPIC_API_KEY secret.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Claude model to evaluate
+        default: claude-sonnet-5-5
+      variants:
+        description: "normal, no-text (screenshot-like), or both"
+        default: normal,no-text
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Evaluate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node evals/ai/run.ts --model "${{ inputs.model }}" --variants "${{ inputs.variants }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai-eval-results
+          path: evals/ai/results/latest.json

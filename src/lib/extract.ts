@@ -27,6 +27,43 @@ function crop(canvas: HTMLCanvasElement, b: Box, maxSide = 160): string {
   return c.toDataURL("image/png");
 }
 
+export interface PlacedColor {
+  box: Box;
+  textured: boolean;
+  hex: string;
+  name: string;
+  types: string[];
+  serial: string;
+}
+
+/**
+ * Puts AI-named colors on the page. A color tied to a measured region keeps that
+ * region's measured hex; a color given only as a box is measured there. The AI never
+ * supplies a color value.
+ */
+export function placeAiColors(
+  colors: AiColor[],
+  candidates: Candidate[],
+  measureBox: (box: Box, textured: boolean) => string,
+): PlacedColor[] {
+  const out: PlacedColor[] = [];
+  for (const c of colors) {
+    const cand = c.candidateId != null ? candidates.find((x) => x.id === c.candidateId) : undefined;
+    const box = cand ?? c.box;
+    if (!box) continue;
+    const textured = cand ? cand.kind === "texture" : !!c.textured;
+    out.push({
+      box,
+      textured,
+      hex: cand ? cand.hex : measureBox(box, textured),
+      name: cleanName(c.name),
+      types: c.types ?? [],
+      serial: c.serial ?? "",
+    });
+  }
+  return out;
+}
+
 export function findCandidates(page: RenderedPage): Candidate[] {
   const ctx = page.canvas.getContext("2d", { willReadFrequently: true })!;
   const { data } = ctx.getImageData(0, 0, page.width, page.height);
@@ -69,7 +106,10 @@ export async function extractFile(
     addedAt: new Date().toISOString(),
   };
 
-  let trueValues = new Set<number>();
+  // Which pixels the CMYK conversion repainted, per page; used to report how many chips
+  // it actually changed (a chip that merely equals a converted color doesn't count).
+  const cmykMasks = new Map<number, { mask: Uint8Array; width: number }>();
+  let cmykChips = 0;
   // CMYK charts: repaint each page with profile-accurate colors before measuring.
   if (isPdf) {
     try {
@@ -78,11 +118,14 @@ export async function extractFile(
         onProgress("Converting CMYK colors");
         await loadLut();
         const table = correctionTable(fills);
-        trueValues = new Set(table.values());
         for (const page of pages) {
           const ctx = page.canvas.getContext("2d", { willReadFrequently: true })!;
           const img = ctx.getImageData(0, 0, page.width, page.height);
-          if (applyCorrection(img.data, table)) ctx.putImageData(img, 0, 0);
+          const mask = new Uint8Array(page.width * page.height);
+          if (applyCorrection(img.data, table, mask)) {
+            ctx.putImageData(img, 0, 0);
+            cmykMasks.set(page.page, { mask, width: page.width });
+          }
         }
       }
     } catch {
@@ -98,7 +141,7 @@ export async function extractFile(
     const candidates = findCandidates(page);
     if (!candidates.length && page.text.length) continue; // a terms or warranty page
 
-    let named: { box: Box; textured: boolean; hex: string; name: string; types: string[]; serial: string }[] = [];
+    let named: PlacedColor[] = [];
 
     if (method === "ai") {
       onProgress(`Naming colors on page ${page.page}`);
@@ -106,22 +149,7 @@ export async function extractFile(
         const res = await aiLabel(page, candidates, file.name);
         if (res.manufacturer && !source.manufacturer) source.manufacturer = res.manufacturer;
         if (res.productLine && page.page === 1) source.productLine = res.productLine;
-        named = res.colors
-          .map((c: AiColor) => {
-            const cand = c.candidateId != null ? candidates.find((x) => x.id === c.candidateId) : undefined;
-            const box = cand ?? c.box;
-            if (!box) return null;
-            const textured = cand ? cand.kind === "texture" : !!c.textured;
-            return {
-              box,
-              textured,
-              hex: cand ? cand.hex : measure(page, box, textured),
-              name: cleanName(c.name),
-              types: c.types ?? [],
-              serial: c.serial ?? "",
-            };
-          })
-          .filter((x): x is NonNullable<typeof x> => x !== null);
+        named = placeAiColors(res.colors, candidates, (box, textured) => measure(page, box, textured));
       } catch (e) {
         aiFailure = e instanceof Error ? e.message : String(e);
         method = "layout";
@@ -139,7 +167,12 @@ export async function extractFile(
       }));
     }
 
+    const m = cmykMasks.get(page.page);
     for (const n of named) {
+      if (m && !n.textured) {
+        const cx = Math.floor(n.box.x + n.box.w / 2), cy = Math.floor(n.box.y + n.box.h / 2);
+        if (m.mask[cy * m.width + cx]) cmykChips++;
+      }
       let chartCrop: string;
       if (n.textured) {
         // Textures are shown as the chart's own image, so render them sharp.
@@ -170,7 +203,7 @@ export async function extractFile(
 
   source.method = method;
   // Count the chips whose color came from a CMYK fill (text and logos don't count).
-  source.cmykFills = swatches.filter((w) => !w.textured && trueValues.has(parseInt(w.hex.slice(1), 16))).length;
+  source.cmykFills = cmykChips;
   if (aiFailure) source.note = `AI naming was unavailable (${aiFailure}), so names were read from the chart layout. Check them before export.`;
   else if (!swatches.length) source.note = "No color chips were found in this file.";
   else if (swatches.some((s) => s.name.startsWith("Unnamed"))) source.note = "Some chips have no name on the chart. Name them in the review step.";

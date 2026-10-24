@@ -4,18 +4,16 @@
 // Claude only decides which regions are paint chips and reads each one's name,
 // paint types and serial number. It never supplies a color value.
 //
-// Secrets: ANTHROPIC_API_KEY (required), ANTHROPIC_MODEL (optional).
+// Secrets: ANTHROPIC_API_KEY (required), ANTHROPIC_MODEL (optional),
+//          TEAM_DOMAINS (optional, comma-separated; defaults below).
+//
+// The pure functions are exported so tests and the AI evaluation can use the exact
+// prompt and parsing that production uses. The server only starts under Deno.
 
-const MODEL = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-sonnet-5-5";
-const API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
+export const DEFAULT_MODEL = "claude-sonnet-5-5";
+export const DEFAULT_TEAM_DOMAINS = ["smartbuildsystems.com", "bluefractalgroup.com"];
 
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
-interface ExtractRequest {
+export interface ExtractRequest {
   fileName: string;
   page: number;
   width: number;
@@ -25,7 +23,22 @@ interface ExtractRequest {
   text: { text: string; x: number; y: number; w: number; h: number }[];
 }
 
-const tool = {
+export interface NamedColor {
+  candidateId?: number;
+  box?: { x: number; y: number; w: number; h: number };
+  textured: boolean;
+  name: string;
+  types: string[];
+  serial: string;
+}
+
+export interface ExtractResponse {
+  manufacturer: string;
+  productLine: string;
+  colors: NamedColor[];
+}
+
+export const tool = {
   name: "report_colors",
   description: "Report the paint colors offered on this color chart page.",
   input_schema: {
@@ -59,7 +72,7 @@ const tool = {
   },
 };
 
-function prompt(b: ExtractRequest) {
+export function buildPrompt(b: ExtractRequest): string {
   const regions = b.candidates
     .map((c) => `${c.id}: ${c.kind} at x=${c.x} y=${c.y} w=${c.w} h=${c.h}, color ${c.hex}`)
     .join("\n");
@@ -84,58 +97,40 @@ Report every paint color offered on this page:
 Answer by calling the report_colors tool.`;
 }
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
-  if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: cors });
-  if (!API_KEY) return json({ error: "ANTHROPIC_API_KEY is not set on this function." }, 500);
+export function buildMessagesRequest(b: ExtractRequest, model = DEFAULT_MODEL) {
+  return {
+    model,
+    max_tokens: 4096,
+    tools: [tool],
+    // Newer models reject a forced tool choice; "auto" plus a clear instruction works on all.
+    tool_choice: { type: "auto" },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b.image } },
+          { type: "text", text: buildPrompt(b) },
+        ],
+      },
+    ],
+  };
+}
 
-  let body: ExtractRequest;
-  try {
-    body = await req.json();
-  } catch {
-    return json({ error: "Request body must be JSON." }, 400);
-  }
-  if (!body.image || !body.width) return json({ error: "Missing page image." }, 400);
+type RawColor = { candidate_id?: unknown; box?: unknown; textured?: unknown; name?: unknown; types?: unknown; serial?: unknown };
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 4096,
-      tools: [tool],
-      // Newer models reject a forced tool choice; "auto" plus a clear instruction works on all.
-      tool_choice: { type: "auto" },
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: body.image } },
-            { type: "text", text: prompt(body) },
-          ],
-        },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text();
-    console.error("Anthropic error", res.status, detail);
-    return json({ error: `Claude API returned ${res.status}` }, 502);
-  }
-
-  const out = await res.json();
-  const call = out.content?.find((c: { type: string }) => c.type === "tool_use");
+/**
+ * Turns Claude's reply into the response the app expects, or null when the reply
+ * holds no colors. Accepts a report_colors tool call, or a JSON object in text.
+ * Drops colors without a name, unknown or repeated region ids, and boxes that are
+ * too small; a color with neither a valid region nor a box is dropped.
+ */
+export function parseClaudeOutput(out: { content?: { type: string; input?: unknown; text?: string }[] }, candidateIds: number[]): ExtractResponse | null {
+  const call = out.content?.find((c) => c.type === "tool_use");
   let raw: unknown = call?.input;
   if (!raw) {
-    // Fallback: a JSON object in a text reply.
     const text = (out.content ?? [])
-      .filter((c: { type: string }) => c.type === "text")
-      .map((c: { text: string }) => c.text)
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
       .join("\n");
     const m = /\{[\s\S]*\}/.exec(text);
     try {
@@ -144,38 +139,109 @@ Deno.serve(async (req) => {
       raw = undefined;
     }
   }
-  if (!raw) return json({ error: "Claude did not return colors." }, 502);
-  const input = raw as {
-    manufacturer?: string;
-    product_line?: string;
-    colors?: { candidate_id?: number; box?: number[]; textured?: boolean; name: string; types?: string[]; serial?: string }[];
-  };
+  if (!raw || typeof raw !== "object") return null;
+  const input = raw as { manufacturer?: unknown; product_line?: unknown; colors?: unknown };
+  if (!Array.isArray(input.colors)) return null;
 
-  const ids = new Set(body.candidates.map((c) => c.id));
+  const ids = new Set(candidateIds);
   const seen = new Set<number>();
-  const colors = (input.colors ?? [])
-    .filter((c) => c.name?.trim())
-    .map((c) => {
-      const okId = typeof c.candidate_id === "number" && ids.has(c.candidate_id) && !seen.has(c.candidate_id);
-      if (okId) seen.add(c.candidate_id!);
-      const box =
-        !okId && Array.isArray(c.box) && c.box.length === 4 && c.box[2] > 2 && c.box[3] > 2
-          ? { x: c.box[0], y: c.box[1], w: c.box[2], h: c.box[3] }
-          : undefined;
-      return {
-        candidateId: okId ? c.candidate_id : undefined,
-        box,
-        textured: !!c.textured,
-        name: c.name.trim(),
-        types: c.types ?? [],
-        serial: c.serial ?? "",
-      };
-    })
-    .filter((c) => c.candidateId !== undefined || c.box);
+  const colors: NamedColor[] = [];
+  for (const c of input.colors as RawColor[]) {
+    const name = typeof c?.name === "string" ? c.name.trim() : "";
+    if (!name) continue;
+    const id = typeof c.candidate_id === "number" ? c.candidate_id : undefined;
+    const okId = id !== undefined && ids.has(id) && !seen.has(id);
+    if (okId) seen.add(id!);
+    const b = c.box;
+    const box =
+      !okId && Array.isArray(b) && b.length === 4 && b.every((v) => typeof v === "number") && b[2] > 2 && b[3] > 2
+        ? { x: b[0], y: b[1], w: b[2], h: b[3] }
+        : undefined;
+    if (!okId && !box) continue;
+    colors.push({
+      candidateId: okId ? id : undefined,
+      box,
+      textured: c.textured === true,
+      name,
+      types: Array.isArray(c.types) ? c.types.filter((t): t is string => typeof t === "string") : [],
+      serial: typeof c.serial === "string" ? c.serial : "",
+    });
+  }
+  return {
+    manufacturer: typeof input.manufacturer === "string" ? input.manufacturer : "",
+    productLine: typeof input.product_line === "string" ? input.product_line : "",
+    colors,
+  };
+}
 
-  return json({ manufacturer: input.manufacturer ?? "", productLine: input.product_line ?? "", colors });
-});
+/** The signed-in user's email from the request's (already verified) access token. */
+export function emailFromAuthHeader(header: string | null): string {
+  const token = header?.replace(/^Bearer\s+/i, "") ?? "";
+  const part = token.split(".")[1];
+  if (!part) return "";
+  try {
+    const b64 = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
+    const payload = JSON.parse(atob(b64));
+    return typeof payload.email === "string" ? payload.email : "";
+  } catch {
+    return "";
+  }
+}
+
+export function isTeamEmail(email: string, domains: string[]): boolean {
+  const d = email.toLowerCase().split("@")[1];
+  return !!d && domains.map((x) => x.trim().toLowerCase()).includes(d);
+}
+
+/* ---------- Server (Deno only) ---------- */
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...cors, "content-type": "application/json" } });
+}
+
+type DenoLike = { env: { get(k: string): string | undefined }; serve(h: (r: Request) => Response | Promise<Response>): void };
+const deno = (globalThis as { Deno?: DenoLike }).Deno;
+
+if (deno) {
+  const MODEL = deno.env.get("ANTHROPIC_MODEL") ?? DEFAULT_MODEL;
+  const API_KEY = deno.env.get("ANTHROPIC_API_KEY");
+  const TEAM = (deno.env.get("TEAM_DOMAINS") ?? DEFAULT_TEAM_DOMAINS.join(",")).split(",");
+
+  deno.serve(async (req) => {
+    if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: cors });
+    if (!API_KEY) return json({ error: "ANTHROPIC_API_KEY is not set on this function." }, 500);
+    if (!isTeamEmail(emailFromAuthHeader(req.headers.get("authorization")), TEAM)) {
+      return json({ error: "AI naming is only available to team members." }, 403);
+    }
+
+    let body: ExtractRequest;
+    try {
+      body = await req.json();
+    } catch {
+      return json({ error: "Request body must be JSON." }, 400);
+    }
+    if (!body.image || !body.width) return json({ error: "Missing page image." }, 400);
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify(buildMessagesRequest(body, MODEL)),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      console.error("Anthropic error", res.status, detail);
+      return json({ error: `Claude API returned ${res.status}` }, 502);
+    }
+
+    const parsed = parseClaudeOutput(await res.json(), body.candidates.map((c) => c.id));
+    if (!parsed) return json({ error: "Claude did not return colors." }, 502);
+    return json(parsed);
+  });
 }

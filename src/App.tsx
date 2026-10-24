@@ -4,7 +4,7 @@ import { supabase, supabaseUrl } from "./lib/supabase";
 import { extractFile } from "./lib/extract";
 import { buildRows, validateRows, sourceLabel } from "./lib/rows";
 import { toCsv, toJson, download } from "./lib/csv";
-import { deletePalette, listPalettes, loadPalette, newPalette, recordExport, savePalette, type PaletteSummary } from "./lib/store";
+import { deletePalette, isTeamMember, listPalettes, loadPalette, newPalette, recordExport, savePalette, SaveConflict, type PaletteSummary } from "./lib/store";
 import type { CodeStyle, PaletteDoc, RowOverride, Source } from "./lib/types";
 import { Chip } from "./components/Chip";
 import { ChartRail } from "./components/ChartRail";
@@ -28,7 +28,27 @@ export default function App() {
 
   if (!authReady) return null;
   if (supabase && !session) return <SignIn />;
-  return <Workspace email={session?.user.email ?? null} />;
+  return <TeamGate email={session?.user.email ?? null} />;
+}
+
+/** Palettes are shared by the whole team; anyone else gets a clear message instead of an empty app. */
+function TeamGate({ email }: { email: string | null }) {
+  const [team, setTeam] = useState<boolean | null>(null);
+  useEffect(() => {
+    isTeamMember().then(setTeam);
+  }, [email]);
+  if (team === null) return null;
+  if (!team)
+    return (
+      <main className="signin">
+        <form onSubmit={(e) => { e.preventDefault(); supabase?.auth.signOut(); }}>
+          <h1>SmartBuild Color Palette</h1>
+          <p>This app is for the SmartBuild and Blue Fractal team. You're signed in as {email}. Sign in with your work email instead.</p>
+          <button className="btn primary">Sign out</button>
+        </form>
+      </main>
+    );
+  return <Workspace email={email} />;
 }
 
 function SignIn() {
@@ -71,7 +91,10 @@ function Workspace({ email }: { email: string | null }) {
   const [tab, setTab] = useState<Tab>("choose");
   const [compare, setCompare] = useState(false);
   const [progress, setProgress] = useState<Record<string, string>>({});
-  const [saveState, setSaveState] = useState<"saved" | "saving" | "unsaved" | "error">("saved");
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "unsaved" | "error" | "conflict">("saved");
+  const [conflict, setConflict] = useState<{ by: string; at: string } | null>(null);
+  /** Save time of the version this browser last loaded or saved. */
+  const stamp = useRef<string | undefined>(undefined);
   const [menuOpen, setMenuOpen] = useState(false);
   const [exportNote, setExportNote] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -81,13 +104,23 @@ function Workspace({ email }: { email: string | null }) {
 
   const refreshList = useCallback(() => listPalettes().then(setList).catch(() => {}), []);
 
+  /** Shows a palette without treating the switch itself as an edit to save. */
+  const open = (d: PaletteDoc, saved: boolean) => {
+    first.current = true;
+    stamp.current = saved ? d.updatedAt : undefined;
+    setConflict(null);
+    setSaveState("saved");
+    setDoc(d);
+  };
+
   // Open the most recent palette, or start one.
   useEffect(() => {
     (async () => {
       const all = await listPalettes().catch(() => []);
       setList(all);
       const latest = all[0] ? await loadPalette(all[0].id).catch(() => null) : null;
-      setDoc(latest ?? newPalette());
+      if (latest) open(latest, true);
+      else open(newPalette(), false);
     })();
   }, []);
 
@@ -96,15 +129,37 @@ function Workspace({ email }: { email: string | null }) {
     if (!doc) return;
     if (first.current) { first.current = false; return; }
     if (doc.sources.some((s) => s.status === "reading")) return;
+    if (conflict) return; // wait for the person to choose
     setSaveState("unsaved");
     const t = setTimeout(() => {
       setSaveState("saving");
-      savePalette(doc)
-        .then(() => { setSaveState("saved"); refreshList(); })
-        .catch(() => setSaveState("error"));
+      savePalette(doc, stamp.current)
+        .then((at) => { stamp.current = at; setSaveState("saved"); refreshList(); })
+        .catch((e) => {
+          if (e instanceof SaveConflict) { setConflict({ by: e.by, at: e.at }); setSaveState("conflict"); }
+          else setSaveState("error");
+        });
     }, 700);
     return () => clearTimeout(t);
-  }, [doc, refreshList]);
+  }, [doc, refreshList, conflict]);
+
+  const keepMine = async () => {
+    if (!doc) return;
+    setSaveState("saving");
+    try {
+      stamp.current = await savePalette(doc, stamp.current, true);
+      setConflict(null);
+      setSaveState("saved");
+      refreshList();
+    } catch {
+      setSaveState("error");
+    }
+  };
+  const loadTheirs = async () => {
+    if (!doc) return;
+    const d = await loadPalette(doc.id).catch(() => null);
+    if (d) open(d, true);
+  };
 
   const update = (fn: (d: PaletteDoc) => PaletteDoc) => setDoc((d) => (d ? fn(d) : d));
 
@@ -176,7 +231,7 @@ function Workspace({ email }: { email: string | null }) {
           <button type="button" className="btn quiet" aria-expanded={menuOpen} onClick={() => { setMenuOpen((o) => !o); setConfirmDelete(false); }}>Palettes ▾</button>
           {menuOpen && (
             <div className="menu-list" role="menu">
-              <button role="menuitem" onClick={() => { setDoc(newPalette()); first.current = true; setTab("choose"); setMenuOpen(false); }}>New palette</button>
+              <button role="menuitem" onClick={() => { open(newPalette(), false); setTab("choose"); setMenuOpen(false); }}>New palette</button>
               <hr />
               {list.map((p) => (
                 <button
@@ -184,12 +239,15 @@ function Workspace({ email }: { email: string | null }) {
                   key={p.id}
                   onClick={async () => {
                     const d = await loadPalette(p.id);
-                    if (d) { first.current = true; setDoc(d); }
+                    if (d) open(d, true);
                     setMenuOpen(false);
                   }}
                 >
                   {p.name}
-                  <span className="when">Edited {new Date(p.updatedAt).toLocaleString()}</span>
+                  <span className="when">
+                    Edited {new Date(p.updatedAt).toLocaleString()}
+                    {p.updatedBy ? ` by ${p.updatedBy.split("@")[0]}` : ""}
+                  </span>
                 </button>
               ))}
               {list.some((p) => p.id === doc.id) && (
@@ -202,8 +260,7 @@ function Workspace({ email }: { email: string | null }) {
                       onClick={async () => {
                         await deletePalette(doc.id);
                         await refreshList();
-                        first.current = true;
-                        setDoc(newPalette());
+                        open(newPalette(), false);
                         setConfirmDelete(false);
                         setMenuOpen(false);
                       }}
@@ -226,7 +283,7 @@ function Workspace({ email }: { email: string | null }) {
         />
         <div className="top-right">
           <span className="save-state" role="status">
-            {{ saved: "Saved", saving: "Saving…", unsaved: "Editing", error: "Not saved" }[saveState]}
+            {{ saved: "Saved", saving: "Saving…", unsaved: "Editing", error: "Not saved", conflict: "Not saved" }[saveState]}
           </span>
           {email ? (
             <>
@@ -238,6 +295,18 @@ function Workspace({ email }: { email: string | null }) {
           )}
         </div>
       </header>
+
+      {conflict && (
+        <div className="conflict" role="alert">
+          <span>
+            <strong>{conflict.by.split("@")[0]}</strong> saved changes to this palette at{" "}
+            {new Date(conflict.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}, after you opened it.
+            Your recent edits aren't saved yet.
+          </span>
+          <button className="btn" onClick={loadTheirs}>Load their version</button>
+          <button className="btn quiet" onClick={keepMine}>Keep mine and replace theirs</button>
+        </div>
+      )}
 
       <nav className="tabs" role="tablist">
         <button className="tab" role="tab" aria-selected={tab === "choose"} onClick={() => setTab("choose")}>
@@ -324,7 +393,7 @@ function Workspace({ email }: { email: string | null }) {
                     checked={doc.mergeSameNames}
                     onChange={(e) => update((d) => ({ ...d, mergeSameNames: e.target.checked }))}
                   />
-                  Combine colors with the same name across charts
+                  Combine a manufacturer's same-named colors across its charts
                 </label>
                 <span className="spacer" />
                 <span style={{ color: "var(--ink-2)", fontSize: 13 }}>

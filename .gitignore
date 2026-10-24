@@ -5,3 +5,4 @@ dist
 supabase/.temp
 .DS_Store
 *.tsbuildinfo
+evals/ai/results/

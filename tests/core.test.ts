@@ -99,6 +99,22 @@ describe("export", () => {
     expect(validateRows(buildRows(d))).toEqual([]);
   });
 
+  it("never merges different manufacturers' colors that share a name", () => {
+    const d = doc();
+    d.sources.push({ id: "c", fileName: "c.pdf", manufacturer: "Sherwin-Williams", productLine: "WeatherXL", pageCount: 1, method: "layout", status: "ready", addedAt: "" });
+    d.swatches.push(sw({ sourceId: "c", name: "Charcoal", hex: "#3F3F3F" }));
+    const rows = buildRows(d).filter((r) => r.name === "Charcoal");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.hex).sort()).toEqual(["#3F3F3F", "#4D4C48"]);
+    expect(new Set(rows.map((r) => r.code)).size).toBe(2);
+  });
+
+  it("keeps edits saved under the old name-only key", () => {
+    const d = doc();
+    d.overrides["n:charcoal"] = { code: "CS-CHAR" };
+    expect(buildRows(d).find((r) => r.name === "Charcoal")?.code).toBe("CS-CHAR");
+  });
+
   it("generates short prefixed codes", () => {
     expect(generateCode("Burnished Slate", "Central States", "prefixed")).toBe("CS-BRNSHD");
     expect(generateCode("Tan", "Central States", "prefixed")).toBe("CS-TAN");

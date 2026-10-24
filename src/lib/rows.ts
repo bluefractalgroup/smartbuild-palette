@@ -43,7 +43,9 @@ export function buildRows(doc: PaletteDoc): ExportRow[] {
 
   const groups = new Map<string, Swatch[]>();
   for (const s of selected) {
-    const key = doc.mergeSameNames ? "n:" + nameKey(s.name) : "s:" + s.id;
+    // Same name AND same manufacturer: another maker's "Charcoal" is a different paint.
+    const maker = nameKey(sourceById.get(s.sourceId)?.manufacturer ?? "");
+    const key = doc.mergeSameNames ? `n:${maker}|${nameKey(s.name)}` : "s:" + s.id;
     const g = groups.get(key);
     if (g) g.push(s);
     else groups.set(key, [s]);
@@ -52,13 +54,15 @@ export function buildRows(doc: PaletteDoc): ExportRow[] {
   const rows: ExportRow[] = [];
   const taken = new Set<string>();
   // Codes the user typed are reserved first so generated ones never collide with them.
+  // Palettes saved before merging was scoped to a manufacturer keyed edits by name only.
+  const overrideFor = (key: string) => doc.overrides[key] ?? (key.startsWith("n:") ? doc.overrides["n:" + key.split("|")[1]] : undefined) ?? {};
   for (const [key] of groups) {
-    const c = doc.overrides[key]?.code;
+    const c = overrideFor(key).code;
     if (c) taken.add(c.toUpperCase());
   }
 
   for (const [key, swatches] of groups) {
-    const o = doc.overrides[key] ?? {};
+    const o = overrideFor(key);
     const preferred = swatches.find((s) => s.sourceId === o.preferredSourceId) ?? swatches[0];
     const src = sourceById.get(preferred.sourceId);
     const name = o.name ?? preferred.name;

@@ -48,9 +48,10 @@ Color Name,HEX Code,Unique ID,Color Transparency,Color Code,Color Map,Bump Map,S
   (`BURNISHEDSLATE`) or a maker prefix plus a short form (`CS-BRNSHD`).
 - The file is written without a byte-order mark.
 
-Colors with the same name on several charts are combined into one row. The
-review table flags a combined row when the shades differ (for example,
-Central States Crimson on Panel-Loc Plus versus Horizon-Loc).
+A manufacturer's colors with the same name on several of its charts are combined
+into one row; colors from different manufacturers never combine, even when the
+names match. The review table flags a combined row when the shades differ (for
+example, Central States Crimson on Panel-Loc Plus versus Horizon-Loc).
 
 ## Running it
 
@@ -87,6 +88,21 @@ this browser, and names come from the chart layout (no AI).
 If the AI call fails, the app falls back to reading names from the chart
 layout and says so beside that chart.
 
+### Team sharing
+
+Every palette is shared with the whole team: anyone signed in with an email on a
+team domain can open, edit and export any palette. Team domains are listed in two
+places, which should match:
+
+- the `team_domains` table (who can read and save palettes)
+- the `TEAM_DOMAINS` secret on the `extract-colors` function (who can use AI
+  naming); it defaults to `smartbuildsystems.com,bluefractalgroup.com`
+
+If a teammate saves a palette after you opened it, the app won't overwrite their
+work. It asks whether to load their version or keep yours.
+
+Run `supabase/migrations/20261024000000_team_sharing.sql` after the first migration.
+
 ### Hosting on GitHub Pages
 
 `.github/workflows/deploy.yml` tests, builds and publishes on every push to
@@ -112,5 +128,31 @@ layout and says so beside that chart.
 | `supabase/functions/extract-colors` | Edge function: Claude names the chips |
 | `src/assets/cmyk-srgb-17.bin` | 17⁴ CMYK→sRGB table, built with MuPDF/LittleCMS |
 
-`npm test` runs the unit tests: chip detection, labelling, CMYK conversion
-and the CSV format.
+## Tests
+
+`npm test` runs the unit tests: chip detection, labelling, CMYK conversion, the
+CSV format, merging, and the AI function's prompt and reply parsing.
+
+### AI naming evaluation
+
+`evals/ai/` holds seven real chart pages captured from the app (four Central
+States charts plus their page 2s, which have no colors), with hand-checked
+answers: 78 colors in all. The evaluation sends them to Claude using the
+production prompt and parsing, and scores:
+
+- colors found, and whether each was matched to the right chip
+- extra colors invented, and whether pages with no colors stay empty
+- textured finishes flagged, and paint types read correctly
+
+It runs two ways: `normal` (as the app sends it) and `no-text` (text layer
+removed, like a screenshot, so every name must be read from the picture).
+
+```
+ANTHROPIC_API_KEY=sk-ant-... npm run eval:ai
+npm run eval:ai:mock          # no API calls; checks the harness itself
+```
+
+Or from GitHub: **Actions → AI naming evaluation → Run workflow** (needs an
+`ANTHROPIC_API_KEY` repository secret). The report appears on the run's
+summary page. The normal variant must find at least 95% of colors on the right
+chip with no errors.

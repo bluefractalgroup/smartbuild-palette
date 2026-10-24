@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval:ai": "node evals/ai/run.ts",
+    "eval:ai:mock": "node evals/ai/run.ts --mock"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "5.2.5",

@@ -134,13 +134,19 @@ export function correctionTable(fills: CMYK[]): Map<number, number> {
   for (const f of fills) {
     const [r, g, b] = pdfjsCmykToRgb(f);
     const [R, G, B] = iccCmykToRgb(f);
+    // Skip fills both methods render (nearly) the same, e.g. pure black; repainting
+    // them changes nothing and would mark ordinary RGB black as "converted".
+    if (Math.max(Math.abs(r - R), Math.abs(g - G), Math.abs(b - B)) <= 1) continue;
     map.set((r << 16) | (g << 8) | b, (R << 16) | (G << 8) | B);
   }
   return map;
 }
 
-/** Repaints a rendered page so CMYK fills show their true color. Returns pixels changed. */
-export function applyCorrection(data: Uint8ClampedArray, table: Map<number, number>): number {
+/**
+ * Repaints a rendered page so CMYK fills show their true color. Returns pixels changed.
+ * If `mask` is given (one byte per pixel), repainted pixels are marked with 1.
+ */
+export function applyCorrection(data: Uint8ClampedArray, table: Map<number, number>, mask?: Uint8Array): number {
   if (!table.size) return 0;
   let changed = 0;
   let lastKey = -1, lastVal: number | undefined;
@@ -153,6 +159,7 @@ export function applyCorrection(data: Uint8ClampedArray, table: Map<number, numb
     data[i] = val >> 16;
     data[i + 1] = (val >> 8) & 255;
     data[i + 2] = val & 255;
+    if (mask) mask[i >> 2] = 1;
     changed++;
   }
   return changed;

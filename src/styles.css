@@ -33,7 +33,8 @@ body {
 button, input, select { font: inherit; color: inherit; }
 :focus-visible { outline: 2px dashed var(--focus); outline-offset: 2px; }
 
-.app { display: grid; grid-template-rows: auto auto 1fr; height: 100%; }
+.app { display: flex; flex-direction: column; height: 100%; }
+.app > .choose, .app > .review { flex: 1; min-height: 0; }
 
 /* ---------- Header ---------- */
 .top {
@@ -71,6 +72,14 @@ button, input, select { font: inherit; color: inherit; }
 .field:focus { border-color: var(--ink); outline: none; }
 .field.bad { border-color: var(--danger); }
 select.field { padding-right: 4px; }
+
+/* ---------- Someone else saved first ---------- */
+.conflict {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
+  padding: 10px 24px; background: var(--plate); border-bottom: 1px solid var(--rule);
+  border-left: 4px solid var(--danger); font-size: 14px;
+}
+.conflict span { flex: 1 1 320px; }
 
 /* ---------- Tabs ---------- */
 .tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--rule); background: var(--paper); }

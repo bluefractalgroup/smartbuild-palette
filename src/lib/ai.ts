@@ -60,9 +60,13 @@ export async function aiLabel(page: RenderedPage, candidates: Candidate[], fileN
     throw new Error(detail);
   }
   const res = data as AiResult;
-  // Boxes come back in the scaled picture's pixels.
-  res.colors = (res.colors ?? []).map((col) =>
+  res.colors = unscaleBoxes(res.colors ?? [], k);
+  return res;
+}
+
+/** Boxes come back in the scaled picture's pixels; this maps them to the page canvas. */
+export function unscaleBoxes(colors: AiColor[], k: number): AiColor[] {
+  return colors.map((col) =>
     col.box ? { ...col, box: { x: col.box.x / k, y: col.box.y / k, w: col.box.w / k, h: col.box.h / k } } : col,
   );
-  return res;
 }
